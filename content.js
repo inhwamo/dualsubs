@@ -158,8 +158,37 @@
     return url + sep + params.join("&");
   }
 
+  function bgFetch(url) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ action: "fetchUrl", url }, (resp) => {
+        if (chrome.runtime.lastError)
+          return reject(new Error(chrome.runtime.lastError.message));
+        if (resp && resp.error) return reject(new Error(resp.error));
+        resolve(resp.text || "");
+      });
+    });
+  }
+
   async function fetchSubtitles(track) {
-    // Try JSON3 format first via page.js (MAIN world, has YouTube cookies)
+    const errors = [];
+
+    // Method 1: JSON3 via background service worker (URL has full auth signature)
+    try {
+      const json3Url = buildSubtitleUrl(track, "json3");
+      const text = await bgFetch(json3Url);
+      if (text && text.trim()) {
+        const data = JSON.parse(text);
+        const subs = parseJson3Subtitles(data);
+        if (subs.length > 0) return subs;
+        errors.push("bg-json3: parsed 0 subs");
+      } else {
+        errors.push("bg-json3: empty (" + text.length + " bytes)");
+      }
+    } catch (e) {
+      errors.push("bg-json3: " + e.message);
+    }
+
+    // Method 2: JSON3 via page.js (MAIN world, YouTube cookies)
     try {
       const json3Url = buildSubtitleUrl(track, "json3");
       const result = await requestFromPage("DUAL_SUBS_FETCH", { url: json3Url });
@@ -167,27 +196,35 @@
         const data = JSON.parse(result.text);
         const subs = parseJson3Subtitles(data);
         if (subs.length > 0) return subs;
+        errors.push("page-json3: parsed 0 subs");
+      } else {
+        errors.push("page-json3: empty");
       }
-    } catch {
-      // JSON3 failed, fall through to XML
+    } catch (e) {
+      errors.push("page-json3: " + e.message);
     }
 
-    // Fallback: fetch XML via page.js
+    // Method 3: XML via background
     try {
       const xmlUrl = buildSubtitleUrl(track, null);
-      const result = await requestFromPage("DUAL_SUBS_FETCH", { url: xmlUrl });
-      if (result.text && result.text.trim()) {
-        const subs = parseXmlSubtitles(result.text);
+      const text = await bgFetch(xmlUrl);
+      if (text && text.trim()) {
+        const subs = parseXmlSubtitles(text);
         if (subs.length > 0) return subs;
+        errors.push("bg-xml: parsed 0 subs");
+      } else {
+        errors.push("bg-xml: empty (" + text.length + " bytes)");
       }
-    } catch {
-      // fall through
+    } catch (e) {
+      errors.push("bg-xml: " + e.message);
     }
 
+    const fullUrl = buildSubtitleUrl(track, "json3");
     throw new Error(
-      "Subtitle track returned empty response. URL: " +
-        buildSubtitleUrl(track, "json3").substring(0, 200) +
-        "..."
+      "All fetch methods failed. " + errors.join(" | ") +
+        " | Track: lang=" + (track.languageCode || "?") +
+        " kind=" + (track.kind || "?") +
+        " | URL: " + fullUrl
     );
   }
 
