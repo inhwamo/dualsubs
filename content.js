@@ -140,7 +140,19 @@
     return null;
   }
 
-  function bgFetch(url) {
+  async function fetchText(url) {
+    // Try content script fetch first (same-origin, has YouTube cookies)
+    try {
+      const resp = await fetch(url, { credentials: "include" });
+      if (resp.ok) {
+        const text = await resp.text();
+        if (text && text.trim()) return text;
+      }
+    } catch {
+      // fall through to background fetch
+    }
+
+    // Fallback: fetch via background service worker
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ action: "fetchUrl", url }, (resp) => {
         if (chrome.runtime.lastError)
@@ -154,11 +166,11 @@
   async function fetchSubtitles(track) {
     const baseUrl = track.baseUrl;
 
-    // Try JSON3 format first via background fetch
+    // Try JSON3 format first
     try {
       const json3Url =
         baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
-      const text = await bgFetch(json3Url);
+      const text = await fetchText(json3Url);
       if (text && text.trim()) {
         const data = JSON.parse(text);
         const subs = parseJson3Subtitles(data);
@@ -168,11 +180,22 @@
       // JSON3 failed, fall through to XML
     }
 
-    // Fallback: fetch XML via background
-    const text = await bgFetch(baseUrl);
-    if (!text || !text.trim())
-      throw new Error("Subtitle track returned empty response.");
-    return parseXmlSubtitles(text);
+    // Fallback: fetch XML
+    try {
+      const text = await fetchText(baseUrl);
+      if (text && text.trim()) {
+        const subs = parseXmlSubtitles(text);
+        if (subs.length > 0) return subs;
+      }
+    } catch {
+      // fall through
+    }
+
+    throw new Error(
+      "Subtitle track returned empty response. URL: " +
+        baseUrl.substring(0, 120) +
+        "..."
+    );
   }
 
   function parseJson3Subtitles(data) {
