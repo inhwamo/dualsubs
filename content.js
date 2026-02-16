@@ -15,12 +15,52 @@
   };
 
   let dualSubsState = {
-    subtitles: null, // array of {start, dur, text, translation}
+    subtitles: null,
     syncInterval: null,
     overlay: null,
     currentVideoId: null,
     active: false,
   };
+
+  // ---- Communication with page.js (MAIN world) ----
+
+  function requestFromPage(type, extraData) {
+    return new Promise((resolve, reject) => {
+      const requestId = Math.random().toString(36).slice(2);
+      const resultType = type.replace("DUAL_SUBS_", "DUAL_SUBS_") + "_RESULT";
+
+      // Map request types to result types
+      const resultTypes = {
+        DUAL_SUBS_GET_TRACKS: "DUAL_SUBS_TRACKS_RESULT",
+        DUAL_SUBS_FETCH: "DUAL_SUBS_FETCH_RESULT",
+      };
+      const expectedResult = resultTypes[type];
+
+      function onMessage(event) {
+        if (event.source !== window || !event.data) return;
+        if (event.data.type === expectedResult) {
+          // For fetch, match by requestId
+          if (type === "DUAL_SUBS_FETCH" && event.data.requestId !== requestId)
+            return;
+          window.removeEventListener("message", onMessage);
+          clearTimeout(timer);
+          if (event.data.error) reject(new Error(event.data.error));
+          else resolve(event.data);
+        }
+      }
+      window.addEventListener("message", onMessage);
+
+      const timer = setTimeout(() => {
+        window.removeEventListener("message", onMessage);
+        reject(new Error("Timed out waiting for page script response"));
+      }, 15000);
+
+      window.postMessage(
+        { type, requestId, ...extraData },
+        "*"
+      );
+    });
+  }
 
   // ---- Subtitle Extraction ----
 
@@ -29,55 +69,21 @@
     return params.get("v");
   }
 
-  function extractCaptionTracks() {
-    // Method 1: Inject a script into the page context to read ytInitialPlayerResponse
-    // (content scripts can't access page JS variables directly)
+  async function extractCaptionTracks() {
+    // Method 1: Ask page.js (MAIN world) for tracks
     try {
-      const dataEl = document.getElementById("claude-dual-subs-data");
-      if (dataEl) dataEl.remove();
-
-      const holder = document.createElement("div");
-      holder.id = "claude-dual-subs-data";
-      holder.style.display = "none";
-      document.documentElement.appendChild(holder);
-
-      const script = document.createElement("script");
-      script.textContent = `
-        (function() {
-          try {
-            var pr = ytInitialPlayerResponse ||
-                     (ytplayer && ytplayer.config && ytplayer.config.args &&
-                      JSON.parse(ytplayer.config.args.raw_player_response));
-            var tracks = pr && pr.captions &&
-                         pr.captions.playerCaptionsTracklistRenderer &&
-                         pr.captions.playerCaptionsTracklistRenderer.captionTracks;
-            if (tracks) {
-              document.getElementById("claude-dual-subs-data")
-                .setAttribute("data-tracks", JSON.stringify(tracks));
-            }
-          } catch(e) {}
-        })();
-      `;
-      document.documentElement.appendChild(script);
-      script.remove();
-
-      const raw = holder.getAttribute("data-tracks");
-      holder.remove();
-      if (raw) {
-        const tracks = JSON.parse(raw);
-        if (tracks && tracks.length > 0) return tracks;
-      }
+      const result = await requestFromPage("DUAL_SUBS_GET_TRACKS");
+      if (result.tracks && result.tracks.length > 0) return result.tracks;
     } catch {
       // fall through
     }
 
-    // Method 2: Parse from script tags with proper bracket-counting
+    // Method 2: Parse from script tags with bracket-counting
     const scripts = document.querySelectorAll("script");
     for (const script of scripts) {
       const text = script.textContent;
       if (!text.includes("captionTracks")) continue;
 
-      // Find "captionTracks": and then extract the full array with bracket counting
       const marker = '"captionTracks":';
       const idx = text.indexOf(marker);
       if (idx === -1) continue;
@@ -120,7 +126,6 @@
     const code = LANG_CODES[langName];
     if (!code) return null;
 
-    // Prefer exact language match (manual captions first, then auto-generated)
     const manual = tracks.find(
       (t) => t.languageCode === code && t.kind !== "asr"
     );
@@ -129,7 +134,6 @@
     const auto = tracks.find((t) => t.languageCode === code);
     if (auto) return auto;
 
-    // For Chinese, also check zh-Hans, zh-Hant, zh-CN, zh-TW
     if (code === "zh") {
       const zhVariant = tracks.find((t) =>
         t.languageCode.startsWith("zh")
@@ -140,55 +144,16 @@
     return null;
   }
 
-  function pageFetch(url) {
-    // Inject a fetch into the actual page context so it runs with YouTube's
-    // origin, cookies, and auth — content script fetches run in an isolated
-    // world and don't carry the page's credentials.
-    return new Promise((resolve, reject) => {
-      const id = "dual-subs-fetch-" + Math.random().toString(36).slice(2);
-
-      function onMessage(event) {
-        if (event.data && event.data.id === id) {
-          window.removeEventListener("message", onMessage);
-          if (event.data.error) reject(new Error(event.data.error));
-          else resolve(event.data.text);
-        }
-      }
-      window.addEventListener("message", onMessage);
-
-      const script = document.createElement("script");
-      script.textContent = `
-        (async function() {
-          try {
-            const r = await fetch(${JSON.stringify(url)}, {credentials:"include"});
-            const t = await r.text();
-            window.postMessage({id:${JSON.stringify(id)}, text:t}, "*");
-          } catch(e) {
-            window.postMessage({id:${JSON.stringify(id)}, error:e.message}, "*");
-          }
-        })();
-      `;
-      document.documentElement.appendChild(script);
-      script.remove();
-
-      // Timeout after 10 seconds
-      setTimeout(() => {
-        window.removeEventListener("message", onMessage);
-        reject(new Error("Page fetch timed out"));
-      }, 10000);
-    });
-  }
-
   async function fetchSubtitles(track) {
     const baseUrl = track.baseUrl;
 
-    // Try JSON3 format first (fetched from page context for proper cookies)
+    // Try JSON3 format first via page.js (MAIN world, has YouTube cookies)
     try {
       const json3Url =
         baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
-      const text = await pageFetch(json3Url);
-      if (text && text.trim()) {
-        const data = JSON.parse(text);
+      const result = await requestFromPage("DUAL_SUBS_FETCH", { url: json3Url });
+      if (result.text && result.text.trim()) {
+        const data = JSON.parse(result.text);
         const subs = parseJson3Subtitles(data);
         if (subs.length > 0) return subs;
       }
@@ -196,11 +161,11 @@
       // JSON3 failed, fall through to XML
     }
 
-    // Fallback: fetch XML from page context
+    // Fallback: fetch XML via page.js
     try {
-      const text = await pageFetch(baseUrl);
-      if (text && text.trim()) {
-        const subs = parseXmlSubtitles(text);
+      const result = await requestFromPage("DUAL_SUBS_FETCH", { url: baseUrl });
+      if (result.text && result.text.trim()) {
+        const subs = parseXmlSubtitles(result.text);
         if (subs.length > 0) return subs;
       }
     } catch {
@@ -278,7 +243,6 @@
   // ---- Overlay Display ----
 
   function createOverlay() {
-    // Remove existing overlay if any
     removeOverlay();
 
     const playerContainer =
@@ -422,7 +386,7 @@
 
     // Extract subtitle tracks
     sendStatus("Extracting subtitles...", "info");
-    const tracks = extractCaptionTracks();
+    const tracks = await extractCaptionTracks();
     if (!tracks || tracks.length === 0) {
       const msg = "No subtitle tracks found for this video.";
       sendStatus(msg, "error");
@@ -432,7 +396,6 @@
     // Find matching track
     let track = findTrackForLanguage(tracks, sourceLang);
     if (!track) {
-      // Fallback: try any auto-generated track
       track = tracks.find((t) => t.kind === "asr");
       if (track) {
         sendStatus(
@@ -507,7 +470,6 @@
     dualSubsState.currentVideoId = videoId;
     dualSubsState.active = true;
 
-    // Cache the result
     await setCachedTranslation(
       videoId,
       sourceLang,
@@ -553,10 +515,7 @@
     }
   }
 
-  // Listen for YouTube SPA navigation
   document.addEventListener("yt-navigate-finish", onNavigate);
-
-  // Fallback: poll for URL changes
   setInterval(onNavigate, 1000);
 
   // ---- Message Listener ----
@@ -566,7 +525,7 @@
       startTranslation().then((result) => {
         sendResponse(result);
       });
-      return true; // async response
+      return true;
     }
   });
 })();
