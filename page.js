@@ -1,53 +1,108 @@
 // This script runs in the MAIN world (YouTube's page context).
-// It has access to page JS variables and makes fetches with YouTube's cookies.
-// Communicates with content.js (ISOLATED world) via window.postMessage.
+// It intercepts YouTube's own timedtext requests to capture subtitle data,
+// bypassing the exp=xpe experiment flag that breaks direct fetching.
 
-// Get caption tracks via the innertube /player API. The page HTML's
-// captionTracks URLs contain an exp=xpe experiment flag that causes
-// YouTube's timedtext API to return empty responses. The innertube API
-// returns clean URLs without this flag.
-async function getTracksViaInnertube(videoId) {
-  try {
-    const apiKey =
-      (typeof ytcfg !== "undefined" && ytcfg.get && ytcfg.get("INNERTUBE_API_KEY")) ||
-      "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8";
-    const clientName =
-      (typeof ytcfg !== "undefined" && ytcfg.get && ytcfg.get("INNERTUBE_CLIENT_NAME")) ||
-      "WEB";
-    const clientVersion =
-      (typeof ytcfg !== "undefined" && ytcfg.get && ytcfg.get("INNERTUBE_CLIENT_VERSION")) ||
-      "2.20250101.00.00";
+const interceptedSubtitles = {};
+let pendingResolve = null;
 
-    const resp = await fetch(
-      "/youtubei/v1/player?key=" + apiKey + "&pretend_wifi=1",
-      {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          videoId: videoId,
-          context: {
-            client: {
-              clientName: clientName,
-              clientVersion: clientVersion,
-              hl: navigator.language || "en",
-            },
-          },
-          contentCheckOk: true,
-          racyCheckOk: true,
-        }),
+// ---- Intercept XMLHttpRequest (YouTube uses XHR for timedtext) ----
+
+const OrigXHR = XMLHttpRequest;
+const origOpen = OrigXHR.prototype.open;
+const origSend = OrigXHR.prototype.send;
+
+OrigXHR.prototype.open = function (method, url, ...rest) {
+  this._dualSubsUrl = typeof url === "string" ? url : "";
+  return origOpen.call(this, method, url, ...rest);
+};
+
+OrigXHR.prototype.send = function (...args) {
+  if (this._dualSubsUrl && this._dualSubsUrl.includes("/api/timedtext")) {
+    this.addEventListener("load", function () {
+      try {
+        if (this.responseText && this.responseText.trim()) {
+          const url = new URL(this._dualSubsUrl, location.origin);
+          const lang = url.searchParams.get("lang") || "unknown";
+          const fmt = url.searchParams.get("fmt") || "xml";
+          const kind = url.searchParams.get("kind") || "";
+          const key = lang + ":" + kind;
+
+          interceptedSubtitles[key] = {
+            text: this.responseText,
+            fmt: fmt,
+            lang: lang,
+            kind: kind,
+          };
+
+          // If someone is waiting for this data, resolve immediately
+          if (pendingResolve && pendingResolve.lang === lang) {
+            pendingResolve.resolve(interceptedSubtitles[key]);
+            pendingResolve = null;
+          }
+        }
+      } catch (e) {
+        // ignore interception errors
       }
-    );
+    });
+  }
+  return origSend.call(this, ...args);
+};
 
-    const data = await resp.json();
-    const tracks =
-      data &&
-      data.captions &&
-      data.captions.playerCaptionsTracklistRenderer &&
-      data.captions.playerCaptionsTracklistRenderer.captionTracks;
-    return tracks || null;
+// ---- Also intercept fetch (in case YouTube uses it) ----
+
+const origFetch = window.fetch;
+window.fetch = async function (input, init) {
+  const url = typeof input === "string" ? input : input instanceof Request ? input.url : "";
+  const resp = await origFetch.call(this, input, init);
+
+  if (url.includes("/api/timedtext")) {
+    try {
+      const cloned = resp.clone();
+      const text = await cloned.text();
+      if (text && text.trim()) {
+        const parsed = new URL(url, location.origin);
+        const lang = parsed.searchParams.get("lang") || "unknown";
+        const fmt = parsed.searchParams.get("fmt") || "xml";
+        const kind = parsed.searchParams.get("kind") || "";
+        const key = lang + ":" + kind;
+
+        interceptedSubtitles[key] = { text, fmt, lang, kind };
+
+        if (pendingResolve && pendingResolve.lang === lang) {
+          pendingResolve.resolve(interceptedSubtitles[key]);
+          pendingResolve = null;
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  return resp;
+};
+
+// ---- Trigger YouTube to load captions ----
+
+function triggerCaptionLoad(langCode) {
+  try {
+    const player = document.getElementById("movie_player");
+    if (!player) return false;
+
+    // Get available tracks
+    const tracklist = player.getOption("captions", "tracklist");
+    if (!tracklist || !tracklist.length) return false;
+
+    // Find matching track
+    let track = tracklist.find(
+      (t) => t.languageCode === langCode
+    );
+    if (!track) track = tracklist[0]; // fallback to first available
+
+    // Enable captions with this track — this triggers YouTube to fetch the data
+    player.setOption("captions", "track", track);
+    return true;
   } catch (e) {
-    return null;
+    return false;
   }
 }
 
@@ -56,43 +111,46 @@ function getVideoIdFromUrl() {
   return params.get("v");
 }
 
+// ---- Message handler ----
+
 window.addEventListener("message", async (event) => {
   if (event.source !== window || !event.data) return;
 
   if (event.data.type === "DUAL_SUBS_GET_TRACKS") {
+    // Return available tracks from the player
     let tracks = null;
-
-    // Method 1: innertube /player API (returns URLs without exp=xpe bug)
-    const videoId = getVideoIdFromUrl();
-    if (videoId) {
-      tracks = await getTracksViaInnertube(videoId);
+    try {
+      const player = document.getElementById("movie_player");
+      if (player && player.getOption) {
+        const tracklist = player.getOption("captions", "tracklist");
+        if (tracklist && tracklist.length) {
+          tracks = tracklist.map((t) => ({
+            languageCode: t.languageCode,
+            kind: t.kind || "",
+            name: t.displayName || t.languageName || t.languageCode,
+          }));
+        }
+      }
+    } catch (e) {
+      // ignore
     }
 
-    // Method 2: ytInitialPlayerResponse (may have broken URLs, used as last resort)
+    // Fallback: ytInitialPlayerResponse
     if (!tracks) {
       try {
         if (typeof ytInitialPlayerResponse !== "undefined" && ytInitialPlayerResponse) {
-          tracks =
+          const ct =
             ytInitialPlayerResponse.captions &&
             ytInitialPlayerResponse.captions.playerCaptionsTracklistRenderer &&
             ytInitialPlayerResponse.captions.playerCaptionsTracklistRenderer.captionTracks;
-        }
-      } catch (e) {
-        // ignore
-      }
-    }
-
-    // Method 3: player object
-    if (!tracks) {
-      try {
-        const player = document.getElementById("movie_player");
-        if (player && player.getPlayerResponse) {
-          const resp = player.getPlayerResponse();
-          tracks =
-            resp &&
-            resp.captions &&
-            resp.captions.playerCaptionsTracklistRenderer &&
-            resp.captions.playerCaptionsTracklistRenderer.captionTracks;
+          if (ct) {
+            tracks = ct.map((t) => ({
+              languageCode: t.languageCode,
+              kind: t.kind || "",
+              name: (t.name && t.name.simpleText) || t.languageCode,
+              baseUrl: t.baseUrl,
+            }));
+          }
         }
       } catch (e) {
         // ignore
@@ -105,10 +163,56 @@ window.addEventListener("message", async (event) => {
     );
   }
 
+  if (event.data.type === "DUAL_SUBS_GET_SUBTITLES") {
+    const { langCode, requestId } = event.data;
+    const key = langCode + ":" + "asr";
+    const keyManual = langCode + ":";
+
+    // Check if we already intercepted subtitles for this language
+    let data = interceptedSubtitles[key] || interceptedSubtitles[keyManual];
+
+    if (data) {
+      window.postMessage(
+        { type: "DUAL_SUBS_SUBTITLES_RESULT", requestId, data },
+        "*"
+      );
+      return;
+    }
+
+    // Trigger YouTube to load captions and wait for interception
+    triggerCaptionLoad(langCode);
+
+    // Wait up to 10 seconds for the intercepted data
+    const timeout = setTimeout(() => {
+      if (pendingResolve && pendingResolve.requestId === requestId) {
+        pendingResolve.resolve(null);
+        pendingResolve = null;
+      }
+    }, 10000);
+
+    const result = await new Promise((resolve) => {
+      // Check again in case it arrived during triggerCaptionLoad
+      const existing = interceptedSubtitles[key] || interceptedSubtitles[keyManual];
+      if (existing) {
+        clearTimeout(timeout);
+        resolve(existing);
+        return;
+      }
+      pendingResolve = { resolve, lang: langCode, requestId };
+    });
+
+    clearTimeout(timeout);
+    window.postMessage(
+      { type: "DUAL_SUBS_SUBTITLES_RESULT", requestId, data: result },
+      "*"
+    );
+  }
+
+  // Keep the plain fetch handler for non-timedtext URLs if needed
   if (event.data.type === "DUAL_SUBS_FETCH") {
     const { url, requestId } = event.data;
     try {
-      const resp = await fetch(url, { credentials: "include" });
+      const resp = await origFetch(url, { credentials: "include" });
       const text = await resp.text();
       window.postMessage(
         { type: "DUAL_SUBS_FETCH_RESULT", requestId, text },

@@ -1,5 +1,4 @@
 (() => {
-  // Language name to ISO code mapping for subtitle track matching
   const LANG_CODES = {
     French: "fr",
     Korean: "ko",
@@ -27,38 +26,35 @@
   function requestFromPage(type, extraData) {
     return new Promise((resolve, reject) => {
       const requestId = Math.random().toString(36).slice(2);
-      const resultType = type.replace("DUAL_SUBS_", "DUAL_SUBS_") + "_RESULT";
 
-      // Map request types to result types
       const resultTypes = {
         DUAL_SUBS_GET_TRACKS: "DUAL_SUBS_TRACKS_RESULT",
+        DUAL_SUBS_GET_SUBTITLES: "DUAL_SUBS_SUBTITLES_RESULT",
         DUAL_SUBS_FETCH: "DUAL_SUBS_FETCH_RESULT",
       };
       const expectedResult = resultTypes[type];
 
       function onMessage(event) {
         if (event.source !== window || !event.data) return;
-        if (event.data.type === expectedResult) {
-          // For fetch, match by requestId
-          if (type === "DUAL_SUBS_FETCH" && event.data.requestId !== requestId)
-            return;
-          window.removeEventListener("message", onMessage);
-          clearTimeout(timer);
-          if (event.data.error) reject(new Error(event.data.error));
-          else resolve(event.data);
-        }
+        if (event.data.type !== expectedResult) return;
+        if (
+          (type === "DUAL_SUBS_FETCH" || type === "DUAL_SUBS_GET_SUBTITLES") &&
+          event.data.requestId !== requestId
+        )
+          return;
+        window.removeEventListener("message", onMessage);
+        clearTimeout(timer);
+        if (event.data.error) reject(new Error(event.data.error));
+        else resolve(event.data);
       }
       window.addEventListener("message", onMessage);
 
       const timer = setTimeout(() => {
         window.removeEventListener("message", onMessage);
-        reject(new Error("Timed out waiting for page script response"));
+        reject(new Error("Timed out waiting for page script"));
       }, 15000);
 
-      window.postMessage(
-        { type, requestId, ...extraData },
-        "*"
-      );
+      window.postMessage({ type, requestId, ...extraData }, "*");
     });
   }
 
@@ -69,8 +65,26 @@
     return params.get("v");
   }
 
-  async function extractCaptionTracks() {
-    // Method 1: Ask page.js (MAIN world) for tracks
+  async function getSubtitlesViaInterception(langCode) {
+    // Ask page.js to trigger YouTube's caption loading and intercept the data
+    const result = await requestFromPage("DUAL_SUBS_GET_SUBTITLES", {
+      langCode,
+    });
+    if (!result.data || !result.data.text) return null;
+
+    const { text, fmt } = result.data;
+    if (fmt === "json3" || text.trim().startsWith("{")) {
+      try {
+        return parseJson3Subtitles(JSON.parse(text));
+      } catch {
+        // try XML
+      }
+    }
+    return parseXmlSubtitles(text);
+  }
+
+  async function getAvailableTracks() {
+    // Ask page.js for track list
     try {
       const result = await requestFromPage("DUAL_SUBS_GET_TRACKS");
       if (result.tracks && result.tracks.length > 0) return result.tracks;
@@ -78,7 +92,7 @@
       // fall through
     }
 
-    // Method 2: Parse from script tags with bracket-counting
+    // Fallback: parse from script tags
     const scripts = document.querySelectorAll("script");
     for (const script of scripts) {
       const text = script.textContent;
@@ -95,7 +109,6 @@
       let inStr = false;
       let esc = false;
       let arrEnd = -1;
-
       for (let i = arrStart; i < text.length; i++) {
         const ch = text[i];
         if (esc) { esc = false; continue; }
@@ -108,7 +121,6 @@
           if (depth === 0) { arrEnd = i + 1; break; }
         }
       }
-
       if (arrEnd === -1) continue;
 
       try {
@@ -144,90 +156,6 @@
     return null;
   }
 
-  function buildSubtitleUrl(track, fmt) {
-    // The captionTracks baseUrl is incomplete — it lacks lang, kind, and fmt
-    // parameters which must be appended from the track object fields.
-    let url = track.baseUrl;
-    const sep = url.includes("?") ? "&" : "?";
-    const params = [];
-    if (track.languageCode && !url.includes("&lang="))
-      params.push("lang=" + encodeURIComponent(track.languageCode));
-    if (track.kind && !url.includes("&kind="))
-      params.push("kind=" + encodeURIComponent(track.kind));
-    if (fmt) params.push("fmt=" + fmt);
-    return url + sep + params.join("&");
-  }
-
-  function bgFetch(url) {
-    return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ action: "fetchUrl", url }, (resp) => {
-        if (chrome.runtime.lastError)
-          return reject(new Error(chrome.runtime.lastError.message));
-        if (resp && resp.error) return reject(new Error(resp.error));
-        resolve(resp.text || "");
-      });
-    });
-  }
-
-  async function fetchSubtitles(track) {
-    const errors = [];
-
-    // Method 1: JSON3 via background service worker (URL has full auth signature)
-    try {
-      const json3Url = buildSubtitleUrl(track, "json3");
-      const text = await bgFetch(json3Url);
-      if (text && text.trim()) {
-        const data = JSON.parse(text);
-        const subs = parseJson3Subtitles(data);
-        if (subs.length > 0) return subs;
-        errors.push("bg-json3: parsed 0 subs");
-      } else {
-        errors.push("bg-json3: empty (" + text.length + " bytes)");
-      }
-    } catch (e) {
-      errors.push("bg-json3: " + e.message);
-    }
-
-    // Method 2: JSON3 via page.js (MAIN world, YouTube cookies)
-    try {
-      const json3Url = buildSubtitleUrl(track, "json3");
-      const result = await requestFromPage("DUAL_SUBS_FETCH", { url: json3Url });
-      if (result.text && result.text.trim()) {
-        const data = JSON.parse(result.text);
-        const subs = parseJson3Subtitles(data);
-        if (subs.length > 0) return subs;
-        errors.push("page-json3: parsed 0 subs");
-      } else {
-        errors.push("page-json3: empty");
-      }
-    } catch (e) {
-      errors.push("page-json3: " + e.message);
-    }
-
-    // Method 3: XML via background
-    try {
-      const xmlUrl = buildSubtitleUrl(track, null);
-      const text = await bgFetch(xmlUrl);
-      if (text && text.trim()) {
-        const subs = parseXmlSubtitles(text);
-        if (subs.length > 0) return subs;
-        errors.push("bg-xml: parsed 0 subs");
-      } else {
-        errors.push("bg-xml: empty (" + text.length + " bytes)");
-      }
-    } catch (e) {
-      errors.push("bg-xml: " + e.message);
-    }
-
-    const fullUrl = buildSubtitleUrl(track, "json3");
-    throw new Error(
-      "All fetch methods failed. " + errors.join(" | ") +
-        " | Track: lang=" + (track.languageCode || "?") +
-        " kind=" + (track.kind || "?") +
-        " | URL: " + fullUrl
-    );
-  }
-
   function parseJson3Subtitles(data) {
     const subtitles = [];
     if (!data.events) return subtitles;
@@ -239,7 +167,7 @@
 
       subtitles.push({
         start: (event.tStartMs || 0) / 1000,
-        dur: (event.dDurMs || 0) / 1000,
+        dur: (event.dDurMs || event.dDurationMs || 0) / 1000,
         text: decodeHtmlEntities(text),
       });
     }
@@ -433,48 +361,45 @@
       return { status: "Loaded from cache." };
     }
 
-    // Extract subtitle tracks
-    sendStatus("Extracting subtitles...", "info");
-    const tracks = await extractCaptionTracks();
+    // Check available tracks
+    sendStatus("Finding subtitle tracks...", "info");
+    const tracks = await getAvailableTracks();
     if (!tracks || tracks.length === 0) {
       const msg = "No subtitle tracks found for this video.";
       sendStatus(msg, "error");
       return { error: msg };
     }
 
-    // Find matching track
+    const langCode = LANG_CODES[sourceLang];
     let track = findTrackForLanguage(tracks, sourceLang);
     if (!track) {
-      track = tracks.find((t) => t.kind === "asr");
-      if (track) {
-        sendStatus(
-          `No ${sourceLang} track found. Using auto-generated ${track.languageCode} track.`,
-          "info"
-        );
-      }
-    }
-    if (!track) {
-      const available = tracks
-        .map((t) => `${t.languageCode}${t.kind === "asr" ? " (auto)" : ""}`)
-        .join(", ");
-      const msg = `No matching subtitle track found. Available: ${available}`;
-      sendStatus(msg, "error");
-      return { error: msg };
+      track = tracks.find((t) => t.kind === "asr") || tracks[0];
+      sendStatus(
+        `No ${sourceLang} track. Using ${track.languageCode} track.`,
+        "info"
+      );
     }
 
-    // Fetch subtitles
-    sendStatus("Fetching subtitle data...", "info");
-    let rawSubs;
+    // Get subtitle data via interception (triggers YouTube's own caption loading)
+    sendStatus(
+      "Loading subtitles via YouTube player...",
+      "info"
+    );
+    let rawSubs = null;
     try {
-      rawSubs = await fetchSubtitles(track);
+      rawSubs = await getSubtitlesViaInterception(track.languageCode);
     } catch (e) {
-      const msg = `Failed to fetch subtitles: ${e.message}`;
-      sendStatus(msg, "error");
-      return { error: msg };
+      sendStatus("Interception: " + e.message, "info");
     }
 
-    if (rawSubs.length === 0) {
-      const msg = "Subtitle track is empty.";
+    if (!rawSubs || rawSubs.length === 0) {
+      const msg =
+        "Could not capture subtitle data. Make sure the video has captions available " +
+        "(check the CC button on the player). Track: " +
+        track.languageCode +
+        " (" +
+        (track.kind || "manual") +
+        ")";
       sendStatus(msg, "error");
       return { error: msg };
     }
