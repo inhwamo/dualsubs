@@ -1,0 +1,44 @@
+#claude-dual-subs-overlay {
+  position: absolute;
+  bottom: 60px;
+  left: 0;
+  right: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  pointer-events: none;
+  text-align: center;
+}
+
+.claude-dual-subs-original {
+  font-size: 14px;
+  color: #ccc;
+  opacity: 0.75;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 4px;
+  padding: 4px 10px;
+  max-width: 85%;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  font-family: "YouTube Noto", Roboto, Arial, sans-serif;
+  line-height: 1.3;
+}
+
+.claude-dual-subs-translated {
+  font-size: 18px;
+  color: #fff;
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.7);
+  border-radius: 4px;
+  padding: 4px 10px;
+  max-width: 85%;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+  font-family: "YouTube Noto", Roboto, Arial, sans-serif;
+  line-height: 1.3;
+}
+
+.claude-dual-subs-original:empty,
+.claude-dual-subs-translated:empty {
+  display: none;
+}
