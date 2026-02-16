@@ -144,13 +144,24 @@
     return null;
   }
 
-  async function fetchSubtitles(track) {
-    const baseUrl = track.baseUrl;
+  function buildSubtitleUrl(track, fmt) {
+    // The captionTracks baseUrl is incomplete — it lacks lang, kind, and fmt
+    // parameters which must be appended from the track object fields.
+    let url = track.baseUrl;
+    const sep = url.includes("?") ? "&" : "?";
+    const params = [];
+    if (track.languageCode && !url.includes("&lang="))
+      params.push("lang=" + encodeURIComponent(track.languageCode));
+    if (track.kind && !url.includes("&kind="))
+      params.push("kind=" + encodeURIComponent(track.kind));
+    if (fmt) params.push("fmt=" + fmt);
+    return url + sep + params.join("&");
+  }
 
+  async function fetchSubtitles(track) {
     // Try JSON3 format first via page.js (MAIN world, has YouTube cookies)
     try {
-      const json3Url =
-        baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
+      const json3Url = buildSubtitleUrl(track, "json3");
       const result = await requestFromPage("DUAL_SUBS_FETCH", { url: json3Url });
       if (result.text && result.text.trim()) {
         const data = JSON.parse(result.text);
@@ -163,7 +174,8 @@
 
     // Fallback: fetch XML via page.js
     try {
-      const result = await requestFromPage("DUAL_SUBS_FETCH", { url: baseUrl });
+      const xmlUrl = buildSubtitleUrl(track, null);
+      const result = await requestFromPage("DUAL_SUBS_FETCH", { url: xmlUrl });
       if (result.text && result.text.trim()) {
         const subs = parseXmlSubtitles(result.text);
         if (subs.length > 0) return subs;
@@ -174,7 +186,7 @@
 
     throw new Error(
       "Subtitle track returned empty response. URL: " +
-        baseUrl.substring(0, 120) +
+        buildSubtitleUrl(track, "json3").substring(0, 200) +
         "..."
     );
   }
