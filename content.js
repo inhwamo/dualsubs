@@ -87,21 +87,33 @@
   }
 
   async function fetchSubtitles(track) {
-    // Try JSON3 format first (easier to parse)
-    let url = track.baseUrl;
-    const useJson3 = !url.includes("fmt=");
-    if (useJson3) {
-      url += (url.includes("?") ? "&" : "?") + "fmt=json3";
+    const baseUrl = track.baseUrl;
+
+    // Try JSON3 format first
+    try {
+      const json3Url =
+        baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
+      const resp = await fetch(json3Url);
+      if (resp.ok) {
+        const text = await resp.text();
+        if (text && text.trim()) {
+          const data = JSON.parse(text);
+          const subs = parseJson3Subtitles(data);
+          if (subs.length > 0) return subs;
+        }
+      }
+    } catch {
+      // JSON3 failed, fall through to XML
     }
 
-    const response = await fetch(url);
-    if (!response.ok)
-      throw new Error(`Failed to fetch subtitles: ${response.status}`);
-
-    if (useJson3) {
-      return parseJson3Subtitles(await response.json());
-    }
-    return parseXmlSubtitles(await response.text());
+    // Fallback: fetch as XML
+    const resp = await fetch(baseUrl);
+    if (!resp.ok)
+      throw new Error(`Failed to fetch subtitles: ${resp.status}`);
+    const text = await resp.text();
+    if (!text || !text.trim())
+      throw new Error("Subtitle track returned empty response.");
+    return parseXmlSubtitles(text);
   }
 
   function parseJson3Subtitles(data) {
