@@ -140,37 +140,53 @@
     return null;
   }
 
-  async function fetchText(url) {
-    // Try content script fetch first (same-origin, has YouTube cookies)
-    try {
-      const resp = await fetch(url, { credentials: "include" });
-      if (resp.ok) {
-        const text = await resp.text();
-        if (text && text.trim()) return text;
-      }
-    } catch {
-      // fall through to background fetch
-    }
-
-    // Fallback: fetch via background service worker
+  function pageFetch(url) {
+    // Inject a fetch into the actual page context so it runs with YouTube's
+    // origin, cookies, and auth — content script fetches run in an isolated
+    // world and don't carry the page's credentials.
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ action: "fetchUrl", url }, (resp) => {
-        if (chrome.runtime.lastError)
-          return reject(new Error(chrome.runtime.lastError.message));
-        if (resp && resp.error) return reject(new Error(resp.error));
-        resolve(resp.text);
-      });
+      const id = "dual-subs-fetch-" + Math.random().toString(36).slice(2);
+
+      function onMessage(event) {
+        if (event.data && event.data.id === id) {
+          window.removeEventListener("message", onMessage);
+          if (event.data.error) reject(new Error(event.data.error));
+          else resolve(event.data.text);
+        }
+      }
+      window.addEventListener("message", onMessage);
+
+      const script = document.createElement("script");
+      script.textContent = `
+        (async function() {
+          try {
+            const r = await fetch(${JSON.stringify(url)}, {credentials:"include"});
+            const t = await r.text();
+            window.postMessage({id:${JSON.stringify(id)}, text:t}, "*");
+          } catch(e) {
+            window.postMessage({id:${JSON.stringify(id)}, error:e.message}, "*");
+          }
+        })();
+      `;
+      document.documentElement.appendChild(script);
+      script.remove();
+
+      // Timeout after 10 seconds
+      setTimeout(() => {
+        window.removeEventListener("message", onMessage);
+        reject(new Error("Page fetch timed out"));
+      }, 10000);
     });
   }
 
   async function fetchSubtitles(track) {
     const baseUrl = track.baseUrl;
 
-    // Try JSON3 format first
+    // Try JSON3 format first (fetched from page context for proper cookies)
     try {
       const json3Url =
         baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
-      const text = await fetchText(json3Url);
+      const text = await pageFetch(json3Url);
       if (text && text.trim()) {
         const data = JSON.parse(text);
         const subs = parseJson3Subtitles(data);
@@ -180,9 +196,9 @@
       // JSON3 failed, fall through to XML
     }
 
-    // Fallback: fetch XML
+    // Fallback: fetch XML from page context
     try {
-      const text = await fetchText(baseUrl);
+      const text = await pageFetch(baseUrl);
       if (text && text.trim()) {
         const subs = parseXmlSubtitles(text);
         if (subs.length > 0) return subs;
