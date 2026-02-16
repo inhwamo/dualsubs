@@ -30,32 +30,86 @@
   }
 
   function extractCaptionTracks() {
-    // Try to find captionTracks in page scripts
+    // Method 1: Inject a script into the page context to read ytInitialPlayerResponse
+    // (content scripts can't access page JS variables directly)
+    try {
+      const dataEl = document.getElementById("claude-dual-subs-data");
+      if (dataEl) dataEl.remove();
+
+      const holder = document.createElement("div");
+      holder.id = "claude-dual-subs-data";
+      holder.style.display = "none";
+      document.documentElement.appendChild(holder);
+
+      const script = document.createElement("script");
+      script.textContent = `
+        (function() {
+          try {
+            var pr = ytInitialPlayerResponse ||
+                     (ytplayer && ytplayer.config && ytplayer.config.args &&
+                      JSON.parse(ytplayer.config.args.raw_player_response));
+            var tracks = pr && pr.captions &&
+                         pr.captions.playerCaptionsTracklistRenderer &&
+                         pr.captions.playerCaptionsTracklistRenderer.captionTracks;
+            if (tracks) {
+              document.getElementById("claude-dual-subs-data")
+                .setAttribute("data-tracks", JSON.stringify(tracks));
+            }
+          } catch(e) {}
+        })();
+      `;
+      document.documentElement.appendChild(script);
+      script.remove();
+
+      const raw = holder.getAttribute("data-tracks");
+      holder.remove();
+      if (raw) {
+        const tracks = JSON.parse(raw);
+        if (tracks && tracks.length > 0) return tracks;
+      }
+    } catch {
+      // fall through
+    }
+
+    // Method 2: Parse from script tags with proper bracket-counting
     const scripts = document.querySelectorAll("script");
     for (const script of scripts) {
       const text = script.textContent;
       if (!text.includes("captionTracks")) continue;
 
-      // Find the JSON containing captionTracks
-      const match = text.match(/"captionTracks"\s*:\s*(\[.*?\])\s*[,}]/);
-      if (match) {
-        try {
-          return JSON.parse(match[1]);
-        } catch {
-          // try a broader parse
+      // Find "captionTracks": and then extract the full array with bracket counting
+      const marker = '"captionTracks":';
+      const idx = text.indexOf(marker);
+      if (idx === -1) continue;
+
+      const arrStart = text.indexOf("[", idx + marker.length);
+      if (arrStart === -1) continue;
+
+      let depth = 0;
+      let inStr = false;
+      let esc = false;
+      let arrEnd = -1;
+
+      for (let i = arrStart; i < text.length; i++) {
+        const ch = text[i];
+        if (esc) { esc = false; continue; }
+        if (ch === "\\") { esc = true; continue; }
+        if (ch === '"') { inStr = !inStr; continue; }
+        if (inStr) continue;
+        if (ch === "[") depth++;
+        if (ch === "]") {
+          depth--;
+          if (depth === 0) { arrEnd = i + 1; break; }
         }
       }
-    }
 
-    // Fallback: try ytInitialPlayerResponse
-    if (window.ytInitialPlayerResponse) {
+      if (arrEnd === -1) continue;
+
       try {
-        const tracks =
-          window.ytInitialPlayerResponse.captions
-            ?.playerCaptionsTracklistRenderer?.captionTracks;
-        if (tracks) return tracks;
+        const tracks = JSON.parse(text.substring(arrStart, arrEnd));
+        if (tracks && tracks.length > 0) return tracks;
       } catch {
-        // ignore
+        // continue
       }
     }
 
@@ -86,31 +140,36 @@
     return null;
   }
 
+  function bgFetch(url) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ action: "fetchUrl", url }, (resp) => {
+        if (chrome.runtime.lastError)
+          return reject(new Error(chrome.runtime.lastError.message));
+        if (resp && resp.error) return reject(new Error(resp.error));
+        resolve(resp.text);
+      });
+    });
+  }
+
   async function fetchSubtitles(track) {
     const baseUrl = track.baseUrl;
 
-    // Try JSON3 format first
+    // Try JSON3 format first via background fetch
     try {
       const json3Url =
         baseUrl + (baseUrl.includes("?") ? "&" : "?") + "fmt=json3";
-      const resp = await fetch(json3Url);
-      if (resp.ok) {
-        const text = await resp.text();
-        if (text && text.trim()) {
-          const data = JSON.parse(text);
-          const subs = parseJson3Subtitles(data);
-          if (subs.length > 0) return subs;
-        }
+      const text = await bgFetch(json3Url);
+      if (text && text.trim()) {
+        const data = JSON.parse(text);
+        const subs = parseJson3Subtitles(data);
+        if (subs.length > 0) return subs;
       }
     } catch {
       // JSON3 failed, fall through to XML
     }
 
-    // Fallback: fetch as XML
-    const resp = await fetch(baseUrl);
-    if (!resp.ok)
-      throw new Error(`Failed to fetch subtitles: ${resp.status}`);
-    const text = await resp.text();
+    // Fallback: fetch XML via background
+    const text = await bgFetch(baseUrl);
     if (!text || !text.trim())
       throw new Error("Subtitle track returned empty response.");
     return parseXmlSubtitles(text);

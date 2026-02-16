@@ -5,7 +5,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     handleTranslation(message).then(sendResponse).catch((err) => {
       sendResponse({ error: err.message || String(err) });
     });
-    return true; // keep the message channel open for async response
+    return true;
+  }
+  if (message.action === "fetchUrl") {
+    fetch(message.url)
+      .then((resp) => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.text();
+      })
+      .then((text) => sendResponse({ text }))
+      .catch((err) => sendResponse({ error: err.message || String(err) }));
+    return true;
   }
 });
 
