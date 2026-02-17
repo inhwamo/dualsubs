@@ -83,13 +83,42 @@ window.fetch = async function (input, init) {
 
 // ---- Trigger YouTube to load captions ----
 
-function triggerCaptionLoad(langCode) {
+async function triggerCaptionLoad(langCode) {
   try {
     const player = document.getElementById("movie_player");
     if (!player) return false;
 
-    // Get available tracks
-    const tracklist = player.getOption("captions", "tracklist");
+    // Ensure the captions module is loaded (YouTube lazy-loads it)
+    if (player.loadModule) {
+      player.loadModule("captions");
+    }
+
+    // Wait for tracklist to become available (module needs time to init)
+    let tracklist = null;
+    for (let i = 0; i < 20; i++) {
+      tracklist = player.getOption("captions", "tracklist");
+      if (tracklist && tracklist.length) break;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+
+    if (!tracklist || !tracklist.length) {
+      // Last resort: try clicking the CC button to force caption init
+      const ccBtn = document.querySelector(".ytp-subtitles-button");
+      if (ccBtn) {
+        ccBtn.click();
+        // Wait for module to load after click
+        for (let i = 0; i < 10; i++) {
+          tracklist = player.getOption("captions", "tracklist");
+          if (tracklist && tracklist.length) break;
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        // Click again to toggle CC back off (we show our own overlay)
+        if (ccBtn.getAttribute("aria-pressed") === "true") {
+          ccBtn.click();
+        }
+      }
+    }
+
     if (!tracklist || !tracklist.length) return false;
 
     // Find matching track
@@ -121,14 +150,22 @@ window.addEventListener("message", async (event) => {
     let tracks = null;
     try {
       const player = document.getElementById("movie_player");
-      if (player && player.getOption) {
-        const tracklist = player.getOption("captions", "tracklist");
-        if (tracklist && tracklist.length) {
-          tracks = tracklist.map((t) => ({
-            languageCode: t.languageCode,
-            kind: t.kind || "",
-            name: t.displayName || t.languageName || t.languageCode,
-          }));
+      if (player) {
+        // Ensure captions module is loaded
+        if (player.loadModule) player.loadModule("captions");
+
+        // Wait briefly for module init
+        for (let i = 0; i < 10; i++) {
+          const tracklist = player.getOption("captions", "tracklist");
+          if (tracklist && tracklist.length) {
+            tracks = tracklist.map((t) => ({
+              languageCode: t.languageCode,
+              kind: t.kind || "",
+              name: t.displayName || t.languageName || t.languageCode,
+            }));
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 200));
         }
       }
     } catch (e) {
@@ -180,7 +217,7 @@ window.addEventListener("message", async (event) => {
     }
 
     // Trigger YouTube to load captions and wait for interception
-    triggerCaptionLoad(langCode);
+    await triggerCaptionLoad(langCode);
 
     // Wait up to 10 seconds for the intercepted data
     const timeout = setTimeout(() => {

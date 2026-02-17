@@ -1,0 +1,7 @@
+# Wiktionary raw data (484 MB)
+dictionaries/kaikki-french.jsonl
+
+# Generated dictionaries (run generate_dict.py to create)
+dictionaries/fr-en.json
+dictionaries/fr-en-full.json
+dictionaries/fr-en-phrases.json

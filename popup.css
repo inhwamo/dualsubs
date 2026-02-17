@@ -84,6 +84,55 @@ button {
   cursor: not-allowed;
 }
 
+button.secondary {
+  background: transparent;
+  color: #999;
+  border: 1px solid #444;
+  margin-top: 8px;
+  font-weight: 400;
+}
+
+button.secondary:hover {
+  background: #2a1a1a;
+  color: #f28b82;
+  border-color: #6a3a3a;
+}
+
+.display-toggle {
+  display: flex;
+  gap: 0;
+  border: 1px solid #333;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.dt-btn {
+  flex: 1;
+  margin: 0;
+  padding: 7px 0;
+  border: none;
+  border-radius: 0;
+  background: #16213e;
+  color: #888;
+  font-size: 12px;
+  font-weight: 500;
+  width: auto;
+}
+
+.dt-btn + .dt-btn {
+  border-left: 1px solid #333;
+}
+
+.dt-btn:hover {
+  background: #1e2d4e;
+  color: #ccc;
+}
+
+.dt-btn.active {
+  background: #d4a574;
+  color: #1a1a2e;
+}
+
 .status {
   margin-top: 12px;
   padding: 8px 10px;
@@ -112,6 +161,30 @@ button {
   background: #3a1a1a;
   color: #f28b82;
   border: 1px solid #4a2a2a;
+}
+
+h2 {
+  font-size: 13px;
+  font-weight: 600;
+  margin-top: 16px;
+  margin-bottom: 8px;
+  color: #ccc;
+}
+
+.lang-pack {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  background: #16213e;
+  border: 1px solid #333;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.pack-status {
+  font-size: 11px;
+  color: #6fcf97;
 }
 
 .note {

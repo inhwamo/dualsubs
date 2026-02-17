@@ -40,10 +40,36 @@
       <option value="English" selected>English</option>
     </select>
 
+    <label for="model">Translation Model</label>
+    <select id="model">
+      <option value="claude-haiku-4-5-20251001">Haiku 4.5 (fast, cheapest)</option>
+      <option value="claude-sonnet-4-5-20250929">Sonnet 4.5 (balanced)</option>
+      <option value="claude-opus-4-6">Opus 4.6 (best quality)</option>
+    </select>
+
     <button id="saveBtn">Save Settings</button>
     <button id="translateBtn">Translate Current Video</button>
 
+    <label>Display</label>
+    <div class="display-toggle" id="displayToggle">
+      <button class="dt-btn active" data-mode="both">Both</button>
+      <button class="dt-btn" data-mode="original">Original</button>
+      <button class="dt-btn" data-mode="translation">Translation</button>
+      <button class="dt-btn" data-mode="off">Off</button>
+    </div>
+
+    <button id="clearBtn" class="secondary">Clear Subtitles &amp; Cache</button>
+
     <div id="status" class="status"></div>
+
+    <h2>Dictionary Packs</h2>
+    <div id="langPacks">
+      <div class="lang-pack">
+        <span>French &rarr; English</span>
+        <span class="pack-status">Bundled</span>
+      </div>
+    </div>
+    <p class="note">More dictionary languages coming soon.</p>
 
     <p class="note">Your API key is stored locally and never shared. Translation cost is typically ~$0.01–0.05 per video.</p>
   </div>
